@@ -1,201 +1,240 @@
-local players = {}
+local PerkManager = {}
 
-local currentDirection = nil
+local players = game:GetService("Players")
+local DataStoreService = game:GetService("DataStoreService")
+local PerkData = DataStoreService:GetDataStore("PlayerPerks")
 
--- Service
-local rs = game:GetService("ReplicatedStorage")
-
---global var
-local change = false
-
--- helper functions
-local function getMaterial(hum)
-	local floormat = hum.FloorMaterial
-	if not floormat then floormat = 'Air' end
-	
-	local matstring = string.split(tostring(floormat),'Enum.Material.')[2]
-	local material = matstring
-	return material
-	
-end
-
-local function loadAnimation(folder,humanoid,root)
-	local animations = folder:GetChildren()
-	if #animations == 0 then return end
-	
-	local loadedTable  = {}
-	
-	for _, animObject in pairs(animations) do
-		local track = humanoid:LoadAnimation(animObject)
-		loadedTable [animObject.Name] = track 
-		
-		track:GetMarkerReachedSignal("Sound"):Connect(function()
-			local material = getMaterial(humanoid)
-			local soundFolder = rs.sounds.footStep
-						
-			local materialFolder = soundFolder:FindFirstChild(material)
-			
-			if not materialFolder then
-				materialFolder = soundFolder:GetChildren()[1] 
-			end
-			
-			print(materialFolder,material)
-			
-			local sounds = materialFolder:GetChildren()
-			
-			if (#sounds > 0) then
-				local randomSound = sounds[math.random(1, #sounds)]
-				
-				local sound = randomSound:Clone()
-				sound.Parent = root
-				sound:Play()
-				game.Debris:AddItem(sound,sound.TimeLength + 0.1)
-				
-			end
-		end)
-	end
-	
-	return loadedTable
-	
-end
-
-local function stopAllAnimation(animations)
-	if not animations then return end
-	
-	for _, animation in pairs(animations) do
-		animation:Stop()
-		
+local function savePlayerPerks(player)
+	local data = {
+		Perk1 = player:FindFirstChild("parck1") and player.parck1.Value,
+		Perk2 = player:FindFirstChild("parck2") and player.parck2.Value
+	}
+	local success, err = pcall(function()
+		PerkData:SetAsync(player.UserId, data)
+	end)
+	if not success then
+		warn("Failed to save perks for " .. player.Name .. ": " .. tostring(err))
 	end
 end
 
-local function playAnimationWithMovement(velocity, animations)
-	if change then return end
-	local newDirection = nil
-	
-	if velocity.X < -0.5 then
-		newDirection = "Left"
-		
-	elseif velocity.X > 0.5 then
-		newDirection = "Right"
-		
-	elseif velocity.Z > 0.5 then
-		newDirection = "Forward"
-		
-	elseif velocity.Z < -0.5 then
-		newDirection = "Backward"
-		
-	end
+local function loadPlayerPerks(player)
+	local success, data = pcall(function()
+		return PerkData:GetAsync(player.UserId)
+	end)
 
-	if newDirection ~= currentDirection then
-		stopAllAnimation(animations)
-
-		if newDirection ~= nil then
-			
-			if animations[newDirection] then
-				animations[newDirection]:Play()
-				
-			end
-			
-		else
-			
-			if currentDirection == "Left" and animations.LeftEnd then animations.LeftEnd:Play()
-			elseif currentDirection == "Right" and animations.RightEnd then animations.RightEnd:Play()
-			elseif currentDirection == "Backward" and animations.BackEnd then animations.BackEnd:Play()
-			elseif currentDirection == "Forward" and animations.ForwardEnd then animations.ForwardEnd:Play()
-			end
-
-			if animations["Idle"] then
-				animations["Idle"]:Play()
-				
-			end
-			
+	if success and data then
+		PerkManager.equiptPerk(player, 1, data.Perk1 or "")
+		PerkManager.equiptPerk(player, 2, data.Perk2 or "")
+	else
+		if not success then
+			warn("Failed to load perks for " .. player.Name)
 		end
-
-		currentDirection = newDirection
-		
 	end
 end
 
-function players.newPlayer(_char)
-	if not _char then return end
-	
-	local player = {}
-	
-	-- player vars
-	local char = _char
-	local root = char:FindFirstChild("HumanoidRootPart")
-	local hum = char:FindFirstChild("Humanoid")
-	
-	char.Animate.Disabled = true
-	char.HumanoidRootPart.Running.Volume = 0
-	
-	--vars
-	local running = false
-	local velocity = root.CFrame:VectorToObjectSpace(hum.MoveDirection)
-		
-	-- animations
-	local animationFolder = rs:WaitForChild("Animations")
-	local walkAnimationFolder = animationFolder:FindFirstChild("walkAnimationFolder")
-	local runAnimationFolder = animationFolder:FindFirstChild("runAnimationFolder")
-	
-	local walkAnimations = loadAnimation(walkAnimationFolder,hum,root)
-	local runAnimation = loadAnimation(runAnimationFolder,hum,root)
-	
-
-	if walkAnimations["Idle"] then
-		walkAnimations["Idle"]:Play()
-		
-	end
-	
-	-- function
-	function player.Running()
-		running = not running
-		
-		hum.WalkSpeed = running and 20 or 10
-		
-		stopAllAnimation(runAnimation)
-		stopAllAnimation(walkAnimations)
-
-		local transition = running and walkAnimations["toRun"] or runAnimation["toWalk"]
-		
-		if transition and currentDirection ~= nil then
-			change = true
-			transition:Play()
-			
-			transition.Ended:Connect(function()
-				change = false 
-				
-			end)
-			
-		else
-			
-			if walkAnimations["Idle"] then
-				walkAnimations["Idle"]:Play()
-				
-			end
-		end
-		
-		currentDirection = nil 
-		
-	end
-
-	
-	function player.update()
-		
-		velocity = root.CFrame:VectorToObjectSpace(hum.MoveDirection)
-		
-		if not running then
-			playAnimationWithMovement(velocity,walkAnimations)
-			
-		else
-			playAnimationWithMovement(velocity,runAnimation)
-
-		end
-		
-	end
-	
-	return player
-	
+local function whatButtonUsed(button)
+	return button == Enum.KeyCode.E
 end
 
-return players
+local function addPerkTimerToPlayer(player)
+	local cdPerk1 = Instance.new("NumberValue")
+	cdPerk1.Name = "cdPerk1"
+	cdPerk1.Value = 0
+	cdPerk1.Parent = player
+
+	local cdPerk2 = Instance.new("NumberValue")
+	cdPerk2.Name = "cdPerk2"
+	cdPerk2.Value = 0
+	cdPerk2.Parent = player
+end
+
+local function waitForGui(player)
+	local gui
+	repeat
+		gui = player:FindFirstChild("PlayerGui")
+		task.wait()
+	until gui
+	return gui
+end
+
+local function setCooldownForPlayerGui(player, timerE, timerQ, perkName)
+	local gui = waitForGui(player)
+	local perkGui = gui:FindFirstChild("perks")
+	if not perkGui then
+		warn("Perks GUI not found for player " .. player.Name)
+		return
+	end
+
+	local frame = perkGui:FindFirstChild("Frame")
+	if not frame then
+		warn("Frame not found inside perks GUI for player " .. player.Name)
+		return
+	end
+
+	local perkSlot1 = frame:FindFirstChild("perk1")
+	local perkSlot2 = frame:FindFirstChild("perk2")
+
+	if perkSlot1 and perkSlot1:FindFirstChild("TextLabel") then
+		perkSlot1.TextLabel.Text = timerE > 0 and tostring(timerE) or perkName
+	else
+		warn("perk1 TextLabel missing for player " .. player.Name)
+	end
+
+	if perkSlot2 and perkSlot2:FindFirstChild("TextLabel") then
+		perkSlot2.TextLabel.Text = timerQ > 0 and tostring(timerQ) or perkName
+	else
+		warn("perk2 TextLabel missing for player " .. player.Name)
+	end
+end
+
+function PerkManager.equiptPerk(player, perkNumber, perkName)
+	local perkSlotOne = player:FindFirstChild("parck1")
+	local perkSlotTwo = player:FindFirstChild("parck2")
+
+	if perkNumber == 1 and perkSlotOne then
+		perkSlotOne.Value = perkName
+	elseif perkNumber == 2 and perkSlotTwo then
+		perkSlotTwo.Value = perkName
+	else
+		warn("Perk slot missing for player:", player.Name)
+	end
+
+	savePlayerPerks(player)
+end
+
+local function runTimer(player, PerkTime, timer, perkName)
+	for i = PerkTime, 0, -1 do
+		timer.Value = i
+		local timerE = player:FindFirstChild("cdPerk1") and player.cdPerk1.Value or 0
+		local timerQ = player:FindFirstChild("cdPerk2") and player.cdPerk2.Value or 0
+		setCooldownForPlayerGui(player, timerE, timerQ, perkName)
+		task.wait(1)
+	end
+end
+
+local function setTimer(player, perk, button)
+	local Perktime = perk.cd
+	local perkName = perk.name or "Perk"
+
+	local timerName = whatButtonUsed(button) and "cdPerk1" or "cdPerk2"
+	local timer = player:FindFirstChild(timerName)
+	if not timer then
+		warn("Cooldown timer not found for player " .. player.Name .. " slot " .. timerName)
+		return
+	end
+
+	timer.Value = Perktime
+
+	local timerE = player:FindFirstChild("cdPerk1") and player.cdPerk1.Value or 0
+	local timerQ = player:FindFirstChild("cdPerk2") and player.cdPerk2.Value or 0
+	setCooldownForPlayerGui(player, timerE, timerQ, perkName)
+
+	task.spawn(function()
+		runTimer(player, Perktime, timer, perkName)
+	end)
+end
+
+local function ifCooldownForPlayerIsOver(player, button)
+	local timerName = whatButtonUsed(button) and "cdPerk1" or "cdPerk2"
+	local timer = player:FindFirstChild(timerName)
+	return timer and timer.Value == 0
+end
+
+local function getPerkTrigger(perkName, button)
+	local perkFolderName = whatButtonUsed(button) and "buttonE" or "buttonQ"
+	local moduleFolder = game.ReplicatedStorage:FindFirstChild("module")
+	if not moduleFolder then
+		warn("Module folder missing in ReplicatedStorage")
+		return
+	end
+
+	local perksFolder = moduleFolder:FindFirstChild("perks")
+	if not perksFolder then
+		warn("Perks folder missing inside module")
+		return
+	end
+
+	local folder = perksFolder:FindFirstChild(perkFolderName)
+	if not folder then
+		warn("Folder " .. perkFolderName .. " missing inside perks")
+		return
+	end
+
+	local perkModule = folder:FindFirstChild(perkName)
+	if not perkModule then
+		warn("Perk module " .. perkName .. " missing inside " .. perkFolderName)
+		return
+	end
+
+	local perkData = require(perkModule)
+	return perkData.Trigger, perkData
+end
+
+function PerkManager.ButtonTrigger(player, button)
+	local perkSlotName = whatButtonUsed(button) and "parck1" or "parck2"
+	local perkSlot = player:FindFirstChild(perkSlotName)
+	if not perkSlot then
+		warn("Perk slot not found:", perkSlotName)
+		return
+	end
+
+	local perkName = perkSlot.Value
+	if not perkName or perkName == "" then
+		warn("No perk equipped for button:", tostring(button))
+		return
+	end
+
+	local trigger, perkData = getPerkTrigger(perkName, button)
+	if not trigger then
+		warn("No trigger function found for perk:", perkName)
+		return
+	end
+
+	if not ifCooldownForPlayerIsOver(player, button) then
+		warn("Perk is still on cooldown for:", player.Name)
+		return
+	end
+
+	trigger(player)
+	setTimer(player, perkData, button)
+end
+
+function PerkManager.resetCooldowns(player)
+	local cd1 = player:FindFirstChild("cdPerk1")
+	local cd2 = player:FindFirstChild("cdPerk2")
+
+	if cd1 then cd1.Value = 0 end
+	if cd2 then cd2.Value = 0 end
+
+	warn(player.Name .. "'s cooldowns reset")
+end
+
+function PerkManager.clearPerks(player)
+	local perkSlotOne = player:FindFirstChild("parck1")
+	local perkSlotTwo = player:FindFirstChild("parck2")
+
+	if perkSlotOne then
+		perkSlotOne.Value = ""
+	end
+	if perkSlotTwo then
+		perkSlotTwo.Value = ""
+	end
+	savePlayerPerks(player)
+end
+
+function PerkManager.printEquippedPerks(player)
+	local perk1 = player:FindFirstChild("parck1") and player.parck1.Value or "None"
+	local perk2 = player:FindFirstChild("parck2") and player.parck2.Value or "None"
+	print(player.Name .. " equipped perks:")
+	print("  Slot 1 (E): " .. perk1)
+	print("  Slot 2 (Q): " .. perk2)
+end
+
+players.PlayerAdded:Connect(function(player)
+	addPerkTimerToPlayer(player)
+	loadPlayerPerks(player)
+end)
+
+players.PlayerRemoving:Connect(savePlayerPerks)
+
+return PerkManager
