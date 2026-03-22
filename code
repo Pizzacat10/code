@@ -1,240 +1,259 @@
 local PerkManager = {}
 
-local players = game:GetService("Players")
+local Players = game:GetService("Players")
 local DataStoreService = game:GetService("DataStoreService")
-local PerkData = DataStoreService:GetDataStore("PlayerPerks")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local HttpService = game:GetService("HttpService")
 
-local function savePlayerPerks(player)
-	local data = {
-		Perk1 = player:FindFirstChild("parck1") and player.parck1.Value,
-		Perk2 = player:FindFirstChild("parck2") and player.parck2.Value
-	}
-	local success, err = pcall(function()
-		PerkData:SetAsync(player.UserId, data)
-	end)
-	if not success then
-		warn("Failed to save perks for " .. player.Name .. ": " .. tostring(err))
+local PerkDataStore = DataStoreService:GetDataStore("PlayerPerks_v4_Final")
+local Remote = Instance.new("RemoteEvent")
+Remote.Name = "PerkSystemRemote"
+Remote.Parent = ReplicatedStorage
+
+local SessionState = {}
+local GlobalSettings = {
+	MaxSlots = 2,
+	DefaultCooldown = 5,
+	SaveInterval = 300,
+	LoggingEnabled = true
+}
+
+type PerkProfile = {
+	Name: string,
+	Cooldown: number,
+	Duration: number,
+	Execute: (Player, Character: Model) -> (),
+	Cleanup: (Player, Character: Model) -> ()?,
+	Passive: ((Player, Character: Model, DeltaTime: number) -> ())?
+}
+
+type InternalState = {
+	Timers: { [string]: number },
+	ActiveEffects: { [string]: boolean },
+	StartTime: { [string]: number },
+	LastUpdate: number
+}
+
+local function Log(message: string)
+	if GlobalSettings.LoggingEnabled then
+		print(string.format("[PerkManager @ %s]: %s", os.date("%X"), message))
 	end
 end
 
-local function loadPlayerPerks(player)
-	local success, data = pcall(function()
-		return PerkData:GetAsync(player.UserId)
-	end)
-
-	if success and data then
-		PerkManager.equiptPerk(player, 1, data.Perk1 or "")
-		PerkManager.equiptPerk(player, 2, data.Perk2 or "")
-	else
-		if not success then
-			warn("Failed to load perks for " .. player.Name)
-		end
-	end
-end
-
-local function whatButtonUsed(button)
-	return button == Enum.KeyCode.E
-end
-
-local function addPerkTimerToPlayer(player)
-	local cdPerk1 = Instance.new("NumberValue")
-	cdPerk1.Name = "cdPerk1"
-	cdPerk1.Value = 0
-	cdPerk1.Parent = player
-
-	local cdPerk2 = Instance.new("NumberValue")
-	cdPerk2.Name = "cdPerk2"
-	cdPerk2.Value = 0
-	cdPerk2.Parent = player
-end
-
-local function waitForGui(player)
-	local gui
-	repeat
-		gui = player:FindFirstChild("PlayerGui")
-		task.wait()
-	until gui
-	return gui
-end
-
-local function setCooldownForPlayerGui(player, timerE, timerQ, perkName)
-	local gui = waitForGui(player)
-	local perkGui = gui:FindFirstChild("perks")
-	if not perkGui then
-		warn("Perks GUI not found for player " .. player.Name)
-		return
-	end
-
-	local frame = perkGui:FindFirstChild("Frame")
-	if not frame then
-		warn("Frame not found inside perks GUI for player " .. player.Name)
-		return
-	end
-
-	local perkSlot1 = frame:FindFirstChild("perk1")
-	local perkSlot2 = frame:FindFirstChild("perk2")
-
-	if perkSlot1 and perkSlot1:FindFirstChild("TextLabel") then
-		perkSlot1.TextLabel.Text = timerE > 0 and tostring(timerE) or perkName
-	else
-		warn("perk1 TextLabel missing for player " .. player.Name)
-	end
-
-	if perkSlot2 and perkSlot2:FindFirstChild("TextLabel") then
-		perkSlot2.TextLabel.Text = timerQ > 0 and tostring(timerQ) or perkName
-	else
-		warn("perk2 TextLabel missing for player " .. player.Name)
-	end
-end
-
-function PerkManager.equiptPerk(player, perkNumber, perkName)
-	local perkSlotOne = player:FindFirstChild("parck1")
-	local perkSlotTwo = player:FindFirstChild("parck2")
-
-	if perkNumber == 1 and perkSlotOne then
-		perkSlotOne.Value = perkName
-	elseif perkNumber == 2 and perkSlotTwo then
-		perkSlotTwo.Value = perkName
-	else
-		warn("Perk slot missing for player:", player.Name)
-	end
-
-	savePlayerPerks(player)
-end
-
-local function runTimer(player, PerkTime, timer, perkName)
-	for i = PerkTime, 0, -1 do
-		timer.Value = i
-		local timerE = player:FindFirstChild("cdPerk1") and player.cdPerk1.Value or 0
-		local timerQ = player:FindFirstChild("cdPerk2") and player.cdPerk2.Value or 0
-		setCooldownForPlayerGui(player, timerE, timerQ, perkName)
+local function SecureCall(func)
+	local success, result = pcall(func)
+	local retries = 0
+	while not success and retries < 3 do
 		task.wait(1)
+		success, result = pcall(func)
+		retries += 1
+	end
+	return success, result
+end
+
+local function GetPerkModule(name: string): PerkProfile?
+	local folder = ReplicatedStorage:FindFirstChild("PerkModules")
+	if not folder then 
+		warn("PerkModules folder missing in ReplicatedStorage")
+		return nil 
+	end
+	
+	local module = folder:FindFirstChild(name)
+	if module and module:IsA("ModuleScript") then
+		local success, perk = pcall(require, module)
+		if success then return perk end
+	end
+	return nil
+end
+
+local function Initialize(player: Player)
+	local dataFolder = Instance.new("Configuration")
+	dataFolder.Name = "PerkData"
+	
+	for i = 1, GlobalSettings.MaxSlots do
+		local slot = Instance.new("StringValue")
+		slot.Name = "Slot" .. i
+		slot.Value = ""
+		slot.Parent = dataFolder
+	end
+	
+	dataFolder.Parent = player
+	
+	SessionState[player.UserId] = {
+		Timers = {Slot1 = 0, Slot2 = 0},
+		ActiveEffects = {Slot1 = false, Slot2 = false},
+		StartTime = {Slot1 = 0, Slot2 = 0},
+		LastUpdate = os.clock()
+	}
+	
+	local success, savedData = SecureCall(function()
+		return PerkDataStore:GetAsync(tostring(player.UserId))
+	end)
+	
+	if success and savedData then
+		dataFolder.Slot1.Value = savedData.Slot1 or ""
+		dataFolder.Slot2.Value = savedData.Slot2 or ""
+		Log("Successfully initialized data for " .. player.Name)
+	else
+		Log("Created new profile for " .. player.Name)
 	end
 end
 
-local function setTimer(player, perk, button)
-	local Perktime = perk.cd
-	local perkName = perk.name or "Perk"
-
-	local timerName = whatButtonUsed(button) and "cdPerk1" or "cdPerk2"
-	local timer = player:FindFirstChild(timerName)
-	if not timer then
-		warn("Cooldown timer not found for player " .. player.Name .. " slot " .. timerName)
-		return
+local function Save(player: Player)
+	local data = player:FindFirstChild("PerkData")
+	if not data then return end
+	
+	local payload = {
+		Slot1 = data.Slot1.Value,
+		Slot2 = data.Slot2.Value,
+		LastSaved = os.time(),
+		SessionID = HttpService:GenerateGUID(false)
+	}
+	
+	local success, err = SecureCall(function()
+		PerkDataStore:SetAsync(tostring(player.UserId), payload)
+	end)
+	
+	if not success then
+		warn("Failed to save data for " .. player.Name .. ": " .. tostring(err))
 	end
+end
 
-	timer.Value = Perktime
+function PerkManager.SetPerk(player: Player, slot: number, name: string)
+	if slot < 1 or slot > GlobalSettings.MaxSlots then return end
+	
+	local data = player:FindFirstChild("PerkData")
+	if not data then return end
+	
+	local target = data:FindFirstChild("Slot" .. slot)
+	if target then
+		target.Value = name
+		Log(player.Name .. " equipped " .. name .. " to Slot " .. slot)
+	end
+end
 
-	local timerE = player:FindFirstChild("cdPerk1") and player.cdPerk1.Value or 0
-	local timerQ = player:FindFirstChild("cdPerk2") and player.cdPerk2.Value or 0
-	setCooldownForPlayerGui(player, timerE, timerQ, perkName)
-
+function PerkManager.Activate(player: Player, key: Enum.KeyCode)
+	local char = player.Character
+	if not char or char:FindFirstChildOfClass("Humanoid").Health <= 0 then return end
+	
+	local state = SessionState[player.UserId]
+	if not state then return end
+	
+	local slotName = (key == Enum.KeyCode.E) and "Slot1" or "Slot2"
+	local currentTime = os.clock()
+	
+	if currentTime < state.Timers[slotName] then 
+		Log(player.Name .. " activation blocked: Cooldown active")
+		return 
+	end
+	
+	local perkName = player.PerkData[slotName].Value
+	if perkName == "" then return end
+	
+	local perk = GetPerkModule(perkName)
+	if not perk then return end
+	
+	state.Timers[slotName] = currentTime + perk.Cooldown
+	state.ActiveEffects[slotName] = true
+	state.StartTime[slotName] = currentTime
+	
+	Remote:FireClient(player, "UpdateUI", {
+		Slot = slotName,
+		CD = perk.Cooldown,
+		Name = perk.Name,
+		Duration = perk.Duration
+	})
+	
 	task.spawn(function()
-		runTimer(player, Perktime, timer, perkName)
+		local success, err = pcall(function()
+			perk.Execute(player, char)
+		end)
+		
+		if not success then
+			warn("Execution Error in Perk " .. perkName .. ": " .. err)
+		end
+		
+		if perk.Duration > 0 then
+			task.wait(perk.Duration)
+			state.ActiveEffects[slotName] = false
+			
+			if perk.Cleanup then
+				pcall(perk.Cleanup, player, char)
+			end
+		else
+			state.ActiveEffects[slotName] = false
+		end
 	end)
 end
 
-local function ifCooldownForPlayerIsOver(player, button)
-	local timerName = whatButtonUsed(button) and "cdPerk1" or "cdPerk2"
-	local timer = player:FindFirstChild(timerName)
-	return timer and timer.Value == 0
+function PerkManager.ForceReset(player: Player)
+	local state = SessionState[player.UserId]
+	if not state then return end
+	
+	for slot, _ in pairs(state.Timers) do
+		state.Timers[slot] = 0
+		state.ActiveEffects[slot] = false
+	end
+	
+	Remote:FireClient(player, "ResetUI")
+	Log("Cooldowns forced reset for " .. player.Name)
 end
 
-local function getPerkTrigger(perkName, button)
-	local perkFolderName = whatButtonUsed(button) and "buttonE" or "buttonQ"
-	local moduleFolder = game.ReplicatedStorage:FindFirstChild("module")
-	if not moduleFolder then
-		warn("Module folder missing in ReplicatedStorage")
-		return
-	end
-
-	local perksFolder = moduleFolder:FindFirstChild("perks")
-	if not perksFolder then
-		warn("Perks folder missing inside module")
-		return
-	end
-
-	local folder = perksFolder:FindFirstChild(perkFolderName)
-	if not folder then
-		warn("Folder " .. perkFolderName .. " missing inside perks")
-		return
-	end
-
-	local perkModule = folder:FindFirstChild(perkName)
-	if not perkModule then
-		warn("Perk module " .. perkName .. " missing inside " .. perkFolderName)
-		return
-	end
-
-	local perkData = require(perkModule)
-	return perkData.Trigger, perkData
+function PerkManager.GetRemainingCooldown(player: Player, slot: string): number
+	local state = SessionState[player.UserId]
+	if not state then return 0 end
+	
+	local remaining = state.Timers[slot] - os.clock()
+	return math.max(0, remaining)
 end
 
-function PerkManager.ButtonTrigger(player, button)
-	local perkSlotName = whatButtonUsed(button) and "parck1" or "parck2"
-	local perkSlot = player:FindFirstChild(perkSlotName)
-	if not perkSlot then
-		warn("Perk slot not found:", perkSlotName)
-		return
+function PerkManager.SyncState(player: Player)
+	local state = SessionState[player.UserId]
+	if not state then return end
+	
+	local data = {}
+	for slot, time in pairs(state.Timers) do
+		data[slot] = math.max(0, time - os.clock())
 	end
-
-	local perkName = perkSlot.Value
-	if not perkName or perkName == "" then
-		warn("No perk equipped for button:", tostring(button))
-		return
-	end
-
-	local trigger, perkData = getPerkTrigger(perkName, button)
-	if not trigger then
-		warn("No trigger function found for perk:", perkName)
-		return
-	end
-
-	if not ifCooldownForPlayerIsOver(player, button) then
-		warn("Perk is still on cooldown for:", player.Name)
-		return
-	end
-
-	trigger(player)
-	setTimer(player, perkData, button)
+	
+	Remote:FireClient(player, "Sync", data)
 end
 
-function PerkManager.resetCooldowns(player)
-	local cd1 = player:FindFirstChild("cdPerk1")
-	local cd2 = player:FindFirstChild("cdPerk2")
-
-	if cd1 then cd1.Value = 0 end
-	if cd2 then cd2.Value = 0 end
-
-	warn(player.Name .. "'s cooldowns reset")
-end
-
-function PerkManager.clearPerks(player)
-	local perkSlotOne = player:FindFirstChild("parck1")
-	local perkSlotTwo = player:FindFirstChild("parck2")
-
-	if perkSlotOne then
-		perkSlotOne.Value = ""
-	end
-	if perkSlotTwo then
-		perkSlotTwo.Value = ""
-	end
-	savePlayerPerks(player)
-end
-
-function PerkManager.printEquippedPerks(player)
-	local perk1 = player:FindFirstChild("parck1") and player.parck1.Value or "None"
-	local perk2 = player:FindFirstChild("parck2") and player.parck2.Value or "None"
-	print(player.Name .. " equipped perks:")
-	print("  Slot 1 (E): " .. perk1)
-	print("  Slot 2 (Q): " .. perk2)
-end
-
-players.PlayerAdded:Connect(function(player)
-	addPerkTimerToPlayer(player)
-	loadPlayerPerks(player)
+Players.PlayerAdded:Connect(Initialize)
+Players.PlayerRemoving:Connect(function(player)
+	Save(player)
+	SessionState[player.UserId] = nil
 end)
 
-players.PlayerRemoving:Connect(savePlayerPerks)
+RunService.Heartbeat:Connect(function(dt)
+	for _, player in ipairs(Players:GetPlayers()) do
+		local state = SessionState[player.UserId]
+		local char = player.Character
+		if not state or not char then continue end
+		
+		local data = player:FindFirstChild("PerkData")
+		if not data then continue end
+		
+		for i = 1, GlobalSettings.MaxSlots do
+			local slotName = "Slot" .. i
+			if state.ActiveEffects[slotName] then
+				local perkName = data[slotName].Value
+				local perk = GetPerkModule(perkName)
+				
+				if perk and perk.Passive then
+					pcall(perk.Passive, player, char, dt)
+				end
+			end
+		end
+	end
+end)
+
+game:BindToClose(function()
+	Log("Server shutting down, saving all player data...")
+	for _, player in ipairs(Players:GetPlayers()) do
+		Save(player)
+	end
+end)
 
 return PerkManager
