@@ -1,261 +1,259 @@
-video https://cdn.discordapp.com/attachments/1233883093111279830/1485172948594720871/Roblox-2026-03-22T07_06_18.368Z.mp4?ex=69c0e698&is=69bf9518&hm=938a8823ad153d7119a49997c06d3a2731c9cb32c43cd18b0bad28ec765bdc91&
-
-local PerkManager = {}
-
-local Players = game:GetService("Players")
-local DataStoreService = game:GetService("DataStoreService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Debris = game:GetService("Debris")
 local RunService = game:GetService("RunService")
-local HttpService = game:GetService("HttpService")
 
-local PerkDataStore = DataStoreService:GetDataStore("PlayerPerks_v4_Final")
-local Remote = Instance.new("RemoteEvent")
-Remote.Name = "PerkSystemRemote"
-Remote.Parent = ReplicatedStorage
+local CharterMaster = {}
+CharterMaster.__index = CharterMaster
 
-local SessionState = {}
-local GlobalSettings = {
-	MaxSlots = 2,
-	DefaultCooldown = 5,
-	SaveInterval = 300,
-	LoggingEnabled = true
-}
+function CharterMaster.new(name: string, description: string, model: Model, characterType: string, abilityType: string)
+	local self = setmetatable({}, CharterMaster)
 
-type PerkProfile = {
-	Name: string,
-	Cooldown: number,
-	Duration: number,
-	Execute: (Player, Character: Model) -> (),
-	Cleanup: (Player, Character: Model) -> ()?,
-	Passive: ((Player, Character: Model, DeltaTime: number) -> ())?
-}
+	local newModel = model:Clone()
+	newModel.Parent = workspace
 
-type InternalState = {
-	Timers: { [string]: number },
-	ActiveEffects: { [string]: boolean },
-	StartTime: { [string]: number },
-	LastUpdate: number
-}
+	self._name = name
+	self._model = newModel
+	self._description = description
+	self._characterType = characterType
+	self._abilityType = abilityType
+	self._humanoid = newModel:FindFirstChildOfClass("Humanoid")
+	self._rootPart = newModel:FindFirstChild("HumanoidRootPart")
 
-local function Log(message: string)
-	if GlobalSettings.LoggingEnabled then
-		print(string.format("[PerkManager @ %s]: %s", os.date("%X"), message))
-	end
-end
+	self._stats = {
+		Dmg = 0,
+		Cd = 0,
+		AbilityDmg = 0,
+		AbilityCd = 0,
+		Speed = 16,
+		JumpHeight = 50,
+		MaxMana = 100,
+		Mana = 100,
+		Range = 4
+	} 
 
-local function SecureCall(func)
-	local success, result = pcall(func)
-	local retries = 0
-	while not success and retries < 3 do
-		task.wait(1)
-		success, result = pcall(func)
-		retries += 1
-	end
-	return success, result
-end
-
-local function GetPerkModule(name: string): PerkProfile?
-	local folder = ReplicatedStorage:FindFirstChild("PerkModules")
-	if not folder then 
-		warn("PerkModules folder missing in ReplicatedStorage")
-		return nil 
-	end
-	
-	local module = folder:FindFirstChild(name)
-	if module and module:IsA("ModuleScript") then
-		local success, perk = pcall(require, module)
-		if success then return perk end
-	end
-	return nil
-end
-
-local function Initialize(player: Player)
-	local dataFolder = Instance.new("Configuration")
-	dataFolder.Name = "PerkData"
-	
-	for i = 1, GlobalSettings.MaxSlots do
-		local slot = Instance.new("StringValue")
-		slot.Name = "Slot" .. i
-		slot.Value = ""
-		slot.Parent = dataFolder
-	end
-	
-	dataFolder.Parent = player
-	
-	SessionState[player.UserId] = {
-		Timers = {Slot1 = 0, Slot2 = 0},
-		ActiveEffects = {Slot1 = false, Slot2 = false},
-		StartTime = {Slot1 = 0, Slot2 = 0},
-		LastUpdate = os.clock()
+	self._animations = {}
+	self._cooldowns = {
+		Attack = false,
+		Ability = false,
+		Ult = false
 	}
-	
-	local success, savedData = SecureCall(function()
-		return PerkDataStore:GetAsync(tostring(player.UserId))
+
+	self._activeHitboxes = {}
+	self._isStunned = false
+	self._isAttacking = false
+	self._isAbilityActive = false
+	self._isDead = false
+	self._isBlocking = false
+
+	self:_initInternalEvents()
+
+	return self
+end
+
+function CharterMaster:_initInternalEvents()
+	if not self._humanoid then return end
+
+	self._humanoid.Died:Connect(function()
+		self._isDead = true
+		self:Destroy()
 	end)
-	
-	if success and savedData then
-		dataFolder.Slot1.Value = savedData.Slot1 or ""
-		dataFolder.Slot2.Value = savedData.Slot2 or ""
-		Log("Successfully initialized data for " .. player.Name)
-	else
-		Log("Created new profile for " .. player.Name)
-	end
-end
 
-local function Save(player: Player)
-	local data = player:FindFirstChild("PerkData")
-	if not data then return end
-	
-	local payload = {
-		Slot1 = data.Slot1.Value,
-		Slot2 = data.Slot2.Value,
-		LastSaved = os.time(),
-		SessionID = HttpService:GenerateGUID(false)
-	}
-	
-	local success, err = SecureCall(function()
-		PerkDataStore:SetAsync(tostring(player.UserId), payload)
-	end)
-	
-	if not success then
-		warn("Failed to save data for " .. player.Name .. ": " .. tostring(err))
-	end
-end
-
-function PerkManager.SetPerk(player: Player, slot: number, name: string)
-	if slot < 1 or slot > GlobalSettings.MaxSlots then return end
-	
-	local data = player:FindFirstChild("PerkData")
-	if not data then return end
-	
-	local target = data:FindFirstChild("Slot" .. slot)
-	if target then
-		target.Value = name
-		Log(player.Name .. " equipped " .. name .. " to Slot " .. slot)
-	end
-end
-
-function PerkManager.Activate(player: Player, key: Enum.KeyCode)
-	local char = player.Character
-	if not char or char:FindFirstChildOfClass("Humanoid").Health <= 0 then return end
-	
-	local state = SessionState[player.UserId]
-	if not state then return end
-	
-	local slotName = (key == Enum.KeyCode.E) and "Slot1" or "Slot2"
-	local currentTime = os.clock()
-	
-	if currentTime < state.Timers[slotName] then 
-		Log(player.Name .. " activation blocked: Cooldown active")
-		return 
-	end
-	
-	local perkName = player.PerkData[slotName].Value
-	if perkName == "" then return end
-	
-	local perk = GetPerkModule(perkName)
-	if not perk then return end
-	
-	state.Timers[slotName] = currentTime + perk.Cooldown
-	state.ActiveEffects[slotName] = true
-	state.StartTime[slotName] = currentTime
-	
-	Remote:FireClient(player, "UpdateUI", {
-		Slot = slotName,
-		CD = perk.Cooldown,
-		Name = perk.Name,
-		Duration = perk.Duration
-	})
-	
 	task.spawn(function()
-		local success, err = pcall(function()
-			perk.Execute(player, char)
-		end)
-		
-		if not success then
-			warn("Execution Error in Perk " .. perkName .. ": " .. err)
-		end
-		
-		if perk.Duration > 0 then
-			task.wait(perk.Duration)
-			state.ActiveEffects[slotName] = false
-			
-			if perk.Cleanup then
-				pcall(perk.Cleanup, player, char)
+		while not self._isDead do
+			local dt = task.wait(1)
+			if self._stats.Mana < self._stats.MaxMana then
+				self._stats.Mana = math.min(self._stats.Mana + 2, self._stats.MaxMana)
 			end
-		else
-			state.ActiveEffects[slotName] = false
 		end
 	end)
 end
 
-function PerkManager.ForceReset(player: Player)
-	local state = SessionState[player.UserId]
-	if not state then return end
-	
-	for slot, _ in pairs(state.Timers) do
-		state.Timers[slot] = 0
-		state.ActiveEffects[slot] = false
-	end
-	
-	Remote:FireClient(player, "ResetUI")
-	Log("Cooldowns forced reset for " .. player.Name)
-end
+function CharterMaster:_createHitboxLogic(hitBoxPart: Instance, damage: number, duration: number)
+	local hitList = {}
+	local connection
+	local startTime = os.clock()
 
-function PerkManager.GetRemainingCooldown(player: Player, slot: string): number
-	local state = SessionState[player.UserId]
-	if not state then return 0 end
-	
-	local remaining = state.Timers[slot] - os.clock()
-	return math.max(0, remaining)
-end
+	connection = RunService.Heartbeat:Connect(function()
+		if os.clock() - startTime > duration or self._isDead then
+			connection:Disconnect()
+			return
+		end
 
-function PerkManager.SyncState(player: Player)
-	local state = SessionState[player.UserId]
-	if not state then return end
-	
-	local data = {}
-	for slot, time in pairs(state.Timers) do
-		data[slot] = math.max(0, time - os.clock())
-	end
-	
-	Remote:FireClient(player, "Sync", data)
-end
+		local overlapParams = OverlapParams.new()
+		overlapParams.FilterDescendantsInstances = {self._model}
+		overlapParams.FilterType = Enum.RaycastFilterType.Exclude
 
-Players.PlayerAdded:Connect(Initialize)
-Players.PlayerRemoving:Connect(function(player)
-	Save(player)
-	SessionState[player.UserId] = nil
-end)
+		local parts = workspace:GetPartsInPart(hitBoxPart, overlapParams)
 
-RunService.Heartbeat:Connect(function(dt)
-	for _, player in ipairs(Players:GetPlayers()) do
-		local state = SessionState[player.UserId]
-		local char = player.Character
-		if not state or not char then continue end
-		
-		local data = player:FindFirstChild("PerkData")
-		if not data then continue end
-		
-		for i = 1, GlobalSettings.MaxSlots do
-			local slotName = "Slot" .. i
-			if state.ActiveEffects[slotName] then
-				local perkName = data[slotName].Value
-				local perk = GetPerkModule(perkName)
-				
-				if perk and perk.Passive then
-					pcall(perk.Passive, player, char, dt)
-				end
+		for _, part in pairs(parts) do
+			local character = part.Parent
+			local hum = character:FindFirstChildOfClass("Humanoid")
+
+			if hum and not hitList[character] then
+				hitList[character] = true
+				hum:TakeDamage(damage)
+				self:_playEffect(part, Color3.fromRGB(255, 50, 50))
 			end
 		end
-	end
-end)
+	end)
 
-game:BindToClose(function()
-	Log("Server shutting down, saving all player data...")
-	for _, player in ipairs(Players:GetPlayers()) do
-		Save(player)
-	end
-end)
+	table.insert(self._activeHitboxes, connection)
+end
 
-return PerkManager
+function CharterMaster:_playEffect(targetPart: BasePart, color: Color3)
+	if not targetPart then return end
+	local attachment = Instance.new("Attachment")
+	attachment.Parent = targetPart
+
+	local particles = Instance.new("ParticleEmitter")
+	particles.Color = ColorSequence.new(color)
+	particles.Size = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.5),
+		NumberSequenceKeypoint.new(1, 0)
+	})
+	particles.Lifetime = NumberRange.new(0.3, 0.6)
+	particles.Rate = 100
+	particles.Speed = NumberRange.new(5, 10)
+	particles.Parent = attachment
+
+	task.delay(0.2, function()
+		particles.Enabled = false
+		Debris:AddItem(attachment, 1)
+	end)
+end
+
+function CharterMaster:SetAttack(dmg: number, cd: number, hitBoxPart: Instance)
+	self._stats.Dmg = dmg
+	self._stats.Cd = cd
+	self._mainHitboxPart = hitBoxPart
+end
+
+function CharterMaster:SetAbility(dmg: number, cd: number, hitBoxPart: Instance)
+	self._stats.AbilityDmg = dmg
+	self._stats.AbilityCd = cd
+	self._abilityHitboxPart = hitBoxPart
+end
+
+function CharterMaster:ToggleBlock(state: boolean)
+	if self._isStunned or self._isAttacking or self._isDead then return end
+	self._isBlocking = state
+
+	if state then
+		self._humanoid.WalkSpeed = self._stats.Speed * 0.4
+		if self._animations["block"] then self._animations["block"]:Play() end
+	else
+		self._humanoid.WalkSpeed = self._stats.Speed
+		if self._animations["block"] then self._animations["block"]:Stop() end
+	end
+end
+
+function CharterMaster:SetStun(duration: number)
+	if self._isDead then return end
+	self._isStunned = true
+	self._humanoid.WalkSpeed = 0
+
+	if self._animations["stun"] then
+		self._animations["stun"]:Play()
+	end
+
+	task.delay(duration, function()
+		if self._isDead then return end
+		self._isStunned = false
+		self._humanoid.WalkSpeed = self._stats.Speed
+		if self._animations["stun"] then self._animations["stun"]:Stop() end
+	end)
+end
+
+function CharterMaster:Attack()
+	if self._isAttacking or self._isStunned or self._cooldowns.Attack or self._isBlocking or self._isDead then return end
+
+	self._isAttacking = true
+	self._cooldowns.Attack = true
+
+	if self._animations["attack"] then
+		self._animations["attack"]:Play()
+	end
+
+	task.delay(0.1, function()
+		self:_createHitboxLogic(self._mainHitboxPart, self._stats.Dmg, 0.3)
+	end)
+
+	task.delay(0.4, function()
+		self._isAttacking = false
+	end)
+
+	task.delay(self._stats.Cd, function()
+		self._cooldowns.Attack = false
+	end)
+end
+
+function CharterMaster:AbilityAttack()
+	if self._isAbilityActive or self._isStunned or self._cooldowns.Ability or self._stats.Mana < 25 or self._isDead then return end
+
+	self._isAbilityActive = true
+	self._cooldowns.Ability = true
+	self._stats.Mana -= 25
+
+	if self._animations["ability"] then
+		self._animations["ability"]:Play()
+	end
+
+	task.delay(0.2, function()
+		self:_createHitboxLogic(self._abilityHitboxPart, self._stats.AbilityDmg, 0.6)
+	end)
+
+	task.delay(0.8, function()
+		self._isAbilityActive = false
+	end)
+
+	task.delay(self._stats.AbilityCd, function()
+		self._cooldowns.Ability = false
+	end)
+end
+
+function CharterMaster:LoadAnimation(animation: Animation, animationName: string)
+	local animator = self._model:FindFirstChildWhichIsA("Animator", true) 
+
+	if animator then
+		local track = animator:LoadAnimation(animation)
+		self._animations[animationName] = track
+
+		if animationName == "idle" then
+			track.Looped = true
+			track:Play() 
+		end
+	end
+end
+
+function CharterMaster:UpdateStat(statName: string, value: any)
+	if self._stats[statName] ~= nil then
+		self._stats[statName] = value
+		if statName == "Speed" and self._humanoid then
+			self._humanoid.WalkSpeed = value
+		end
+	end
+end
+
+function CharterMaster:Destroy()
+	self._isDead = true
+
+	for _, connection in pairs(self._activeHitboxes) do
+		if connection then connection:Disconnect() end
+	end
+
+	for _, track in pairs(self._animations) do
+		track:Stop()
+	end
+
+	if self._model then
+		self._model:Destroy()
+	end
+
+	self._stats = nil
+	self._animations = nil
+	self._cooldowns = nil
+	self._activeHitboxes = nil
+
+	setmetatable(self, nil)
+end
+
+return CharterMaster
