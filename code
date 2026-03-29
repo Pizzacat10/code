@@ -19,13 +19,12 @@ function Bird.new(birdModel:Model,_speed:number, _hp:number, _loveNeeded:number 
 	
 	-- status
 	self._stats = {
-		"hp" == _hp,
-		"speed" == _speed,
-		"damage" == _damage,
-		"cd" == _cd,
-		"speed" == _speed,
-		"attackLength" == _attackLength,
-		"loveNeeded" == _loveNeeded
+		hp = _hp,
+		speed = _speed,
+		damage = _damage,
+		cd = _cd,
+		attackLength = _attackLength,
+		loveNeeded = _loveNeeded
 	}
 	
 	self._isAttacking = false
@@ -45,7 +44,7 @@ function Bird.new(birdModel:Model,_speed:number, _hp:number, _loveNeeded:number 
 	self._bird = birdModel
 	
 	-- tween
-	self._tweenInfo = TweenInfo.new(self._stats["speed"], Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, 0, false, 0)
+	self._tweenInfo = TweenInfo.new(_speed, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, 0, false, 0)
 	
 	-- animation
 	local animation = birdModel:FindFirstChild("animations")
@@ -69,12 +68,15 @@ function Bird.new(birdModel:Model,_speed:number, _hp:number, _loveNeeded:number 
 	end
 	
 	-- hitbox
-	self._hitBox = hitBoxModule.new(hitbox)
-	hitbox.OnHit:Connect(function(hit, humanoid)
-		print(hit.Name)
-		humanoid:TakeDamage(self._stats["damage"])
-	end)
+	local Hitbox = hitBoxModule.new(hitbox)
 
+	Hitbox.OnHit:Connect(function(hit, humanoid)
+		print(hit.Name)
+		humanoid:TakeDamage(_damage)
+	end)
+	
+	self._hitbox = Hitbox
+	
 	return self
 end
 
@@ -86,12 +88,12 @@ function Bird:attack()
 	self._hitbox:HitStart()
 	
 	-- play animation
-	if self._track then
+	if self._track["attack"] then
 		self._track["attack"]:Play()
 	end
 	
 	-- stop attacking
-	task.delay(self.self._stats["attackLength"], function()
+	task.delay(self._stats["attackLength"], function()
 		self._hitbox:HitStop()
 		self._isAttacking = false
 	end)
@@ -99,46 +101,51 @@ function Bird:attack()
 end
 
 function Bird:Ai()
-	local walking = false
-	
-	self._hartBeat = runs.Heartbeat:Connect(function()
-		if walking then return end
-		
-		walking = true
-		
-		local poseX = math.random(-maxRangeX, maxRangeX)
-		local poseY = math.random(-maxRangeY, maxRangeY)
+	print("AI Started for: " .. self._name)
 
-		local randomPos = Vector3.new(poseX, poseY, 0)
+	task.spawn(function()
+		while self._bird and self._bird.Parent do
+			if self._track["idle"] then self._track["idle"]:Play() end
+			task.wait(math.random(2, 5)) 
 
-		if not self._stats["speed"] then return end
-		if not self._track["walk"] then return end
-
-		local tween = tw:Create(self._bird, self._tweenInfo, {Position = self._bird.Position + randomPos})
-		tween:Play()
-
-		self._track["walk"]:Play()
-
-		tween.Completed:Connect(function()
-			self._track["walk"]:Stop()
-
-			for _, player in plrs:GetChildren() do
-				if player.Character == nil then continue end
-
-				if player.Character:FindFirstChild("HumanoidRootPart") == nil then continue end
-
-				local distance = (player.Character.HumanoidRootPart.Position - self._bird.Position).Magnitude
-
-				if distance <= 10 then
-					Bird:attack()
-					task.wait(self._stats["attackLength"])
+			local target = nil
+			for _, player in ipairs(plrs:GetPlayers()) do
+				local char = player.Character
+				if char and char:FindFirstChild("HumanoidRootPart") then
+					local dist = (char.HumanoidRootPart.Position - self._bird:GetPivot().Position).Magnitude
+					if dist <= 5 then
+						target = char
+						break
+					end
 				end
-
-				self._track["idle"]:Play()
 			end
-		end)
-		
-		walking = false
+
+			if target then
+				-- Attack logic
+				self:attack()
+				task.wait(self._stats["cd"] or 1)
+			else
+				local currentPos = self._bird:GetPivot().Position
+				local offsetX = math.random(-maxRangeX, maxRangeX)
+				local offsetZ = math.random(-maxRangeY, maxRangeY)
+				local targetPos = currentPos + Vector3.new(offsetX, 0, offsetZ)
+
+				local lookCFrame = CFrame.lookAt(currentPos, targetPos)
+
+				if self._track["walk"] then self._track["walk"]:Play() end
+
+				local moveTween = tw:Create(self._bird.PrimaryPart, self._tweenInfo, {
+					CFrame = CFrame.lookAt(targetPos, targetPos + (targetPos - currentPos))
+				})
+
+				moveTween:Play()
+				moveTween.Completed:Wait()
+
+				if self._track["walk"] then self._track["walk"]:Stop() end
+			end
+
+			task.wait(0.1)
+		end
 	end)
 end
 
