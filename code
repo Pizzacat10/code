@@ -1,259 +1,212 @@
-local Debris = game:GetService("Debris")
-local RunService = game:GetService("RunService")
+-- servises
+local rs = game:GetService("ReplicatedStorage")
+local tw = game:GetService("TweenService")
+local plrs = game:GetService("Players")
+local runs = game:GetService("RunService")
 
-local CharterMaster = {}
-CharterMaster.__index = CharterMaster
+-- constants
+local maxRangeX = 30
+local maxRangeY = 30
 
-function CharterMaster.new(name: string, description: string, model: Model, characterType: string, abilityType: string)
-	local self = setmetatable({}, CharterMaster)
+-- modules
+local hitBoxModule = require(rs:FindFirstChild("RaycastHitboxV4"))
 
-	local newModel = model:Clone()
-	newModel.Parent = workspace
+local Bird = {}
+Bird.__index = Bird
 
-	self._name = name
-	self._model = newModel
-	self._description = description
-	self._characterType = characterType
-	self._abilityType = abilityType
-	self._humanoid = newModel:FindFirstChildOfClass("Humanoid")
-	self._rootPart = newModel:FindFirstChild("HumanoidRootPart")
-
+function Bird.new(birdModel:Model,_speed:number, _hp:number, _loveNeeded:number , _damage:number , _cd:number, _attackLength:number , name:string , image:string , sound , birdType:string , birdRarity:string, hitbox:Part)
+	local self = setmetatable({},Bird)
+	
+	-- status
 	self._stats = {
-		Dmg = 0,
-		Cd = 0,
-		AbilityDmg = 0,
-		AbilityCd = 0,
-		Speed = 16,
-		JumpHeight = 50,
-		MaxMana = 100,
-		Mana = 100,
-		Range = 4
-	} 
-
-	self._animations = {}
-	self._cooldowns = {
-		Attack = false,
-		Ability = false,
-		Ult = false
+		"hp" == _hp,
+		"speed" == _speed,
+		"damage" == _damage,
+		"cd" == _cd,
+		"speed" == _speed,
+		"attackLength" == _attackLength,
+		"loveNeeded" == _loveNeeded
 	}
-
-	self._activeHitboxes = {}
-	self._isStunned = false
+	
 	self._isAttacking = false
-	self._isAbilityActive = false
-	self._isDead = false
-	self._isBlocking = false
-
-	self:_initInternalEvents()
+	
+	self._currentLove = {}
+	self._isTame = false 
+	
+	-- info
+	self._name = name
+	self._image = image
+	self._sound = sound
+	
+	self._type = birdType
+	self._rarity = birdRarity
+	
+	-- bird
+	self._bird = birdModel
+	
+	-- tween
+	self._tweenInfo = TweenInfo.new(self._stats["speed"], Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, 0, false, 0)
+	
+	-- animation
+	local animation = birdModel:FindFirstChild("animations")
+	
+	self._track = {}
+	
+	if animation then
+		local animator = birdModel:FindFirstChild("Humanoid"):FindFirstChild("Animator")
+		
+		if animator then
+			
+			for _, ani in animation do
+				
+				local track = animator:LoadAnimation(ani)
+				
+				self._track[ani.Name] = track
+			end
+			
+		end
+		
+	end
+	
+	-- hitbox
+	self._hitBox = hitBoxModule.new(hitbox)
+	hitbox.OnHit:Connect(function(hit, humanoid)
+		print(hit.Name)
+		humanoid:TakeDamage(self._stats["damage"])
+	end)
 
 	return self
 end
 
-function CharterMaster:_initInternalEvents()
-	if not self._humanoid then return end
-
-	self._humanoid.Died:Connect(function()
-		self._isDead = true
-		self:Destroy()
-	end)
-
-	task.spawn(function()
-		while not self._isDead do
-			local dt = task.wait(1)
-			if self._stats.Mana < self._stats.MaxMana then
-				self._stats.Mana = math.min(self._stats.Mana + 2, self._stats.MaxMana)
-			end
-		end
-	end)
-end
-
-function CharterMaster:_createHitboxLogic(hitBoxPart: Instance, damage: number, duration: number)
-	local hitList = {}
-	local connection
-	local startTime = os.clock()
-
-	connection = RunService.Heartbeat:Connect(function()
-		if os.clock() - startTime > duration or self._isDead then
-			connection:Disconnect()
-			return
-		end
-
-		local overlapParams = OverlapParams.new()
-		overlapParams.FilterDescendantsInstances = {self._model}
-		overlapParams.FilterType = Enum.RaycastFilterType.Exclude
-
-		local parts = workspace:GetPartsInPart(hitBoxPart, overlapParams)
-
-		for _, part in pairs(parts) do
-			local character = part.Parent
-			local hum = character:FindFirstChildOfClass("Humanoid")
-
-			if hum and not hitList[character] then
-				hitList[character] = true
-				hum:TakeDamage(damage)
-				self:_playEffect(part, Color3.fromRGB(255, 50, 50))
-			end
-		end
-	end)
-
-	table.insert(self._activeHitboxes, connection)
-end
-
-function CharterMaster:_playEffect(targetPart: BasePart, color: Color3)
-	if not targetPart then return end
-	local attachment = Instance.new("Attachment")
-	attachment.Parent = targetPart
-
-	local particles = Instance.new("ParticleEmitter")
-	particles.Color = ColorSequence.new(color)
-	particles.Size = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 0.5),
-		NumberSequenceKeypoint.new(1, 0)
-	})
-	particles.Lifetime = NumberRange.new(0.3, 0.6)
-	particles.Rate = 100
-	particles.Speed = NumberRange.new(5, 10)
-	particles.Parent = attachment
-
-	task.delay(0.2, function()
-		particles.Enabled = false
-		Debris:AddItem(attachment, 1)
-	end)
-end
-
-function CharterMaster:SetAttack(dmg: number, cd: number, hitBoxPart: Instance)
-	self._stats.Dmg = dmg
-	self._stats.Cd = cd
-	self._mainHitboxPart = hitBoxPart
-end
-
-function CharterMaster:SetAbility(dmg: number, cd: number, hitBoxPart: Instance)
-	self._stats.AbilityDmg = dmg
-	self._stats.AbilityCd = cd
-	self._abilityHitboxPart = hitBoxPart
-end
-
-function CharterMaster:ToggleBlock(state: boolean)
-	if self._isStunned or self._isAttacking or self._isDead then return end
-	self._isBlocking = state
-
-	if state then
-		self._humanoid.WalkSpeed = self._stats.Speed * 0.4
-		if self._animations["block"] then self._animations["block"]:Play() end
-	else
-		self._humanoid.WalkSpeed = self._stats.Speed
-		if self._animations["block"] then self._animations["block"]:Stop() end
-	end
-end
-
-function CharterMaster:SetStun(duration: number)
-	if self._isDead then return end
-	self._isStunned = true
-	self._humanoid.WalkSpeed = 0
-
-	if self._animations["stun"] then
-		self._animations["stun"]:Play()
-	end
-
-	task.delay(duration, function()
-		if self._isDead then return end
-		self._isStunned = false
-		self._humanoid.WalkSpeed = self._stats.Speed
-		if self._animations["stun"] then self._animations["stun"]:Stop() end
-	end)
-end
-
-function CharterMaster:Attack()
-	if self._isAttacking or self._isStunned or self._cooldowns.Attack or self._isBlocking or self._isDead then return end
-
+function Bird:attack()
+	if self._isAttacking == true then return end
+	
+	-- start attacking
 	self._isAttacking = true
-	self._cooldowns.Attack = true
-
-	if self._animations["attack"] then
-		self._animations["attack"]:Play()
+	self._hitbox:HitStart()
+	
+	-- play animation
+	if self._track then
+		self._track["attack"]:Play()
 	end
-
-	task.delay(0.1, function()
-		self:_createHitboxLogic(self._mainHitboxPart, self._stats.Dmg, 0.3)
-	end)
-
-	task.delay(0.4, function()
+	
+	-- stop attacking
+	task.delay(self.self._stats["attackLength"], function()
+		self._hitbox:HitStop()
 		self._isAttacking = false
 	end)
+	
+end
 
-	task.delay(self._stats.Cd, function()
-		self._cooldowns.Attack = false
+function Bird:Ai()
+	local walking = false
+	
+	self._hartBeat = runs.Heartbeat:Connect(function()
+		if walking then return end
+		
+		walking = true
+		
+		local poseX = math.random(-maxRangeX, maxRangeX)
+		local poseY = math.random(-maxRangeY, maxRangeY)
+
+		local randomPos = Vector3.new(poseX, poseY, 0)
+
+		if not self._stats["speed"] then return end
+		if not self._track["walk"] then return end
+
+		local tween = tw:Create(self._bird, self._tweenInfo, {Position = self._bird.Position + randomPos})
+		tween:Play()
+
+		self._track["walk"]:Play()
+
+		tween.Completed:Connect(function()
+			self._track["walk"]:Stop()
+
+			for _, player in plrs:GetChildren() do
+				if player.Character == nil then continue end
+
+				if player.Character:FindFirstChild("HumanoidRootPart") == nil then continue end
+
+				local distance = (player.Character.HumanoidRootPart.Position - self._bird.Position).Magnitude
+
+				if distance <= 10 then
+					Bird:attack()
+					task.wait(self._stats["attackLength"])
+				end
+
+				self._track["idle"]:Play()
+			end
+		end)
+		
+		walking = false
 	end)
 end
 
-function CharterMaster:AbilityAttack()
-	if self._isAbilityActive or self._isStunned or self._cooldowns.Ability or self._stats.Mana < 25 or self._isDead then return end
+function Bird:Love(player:Player)
+	if self._isTame == true then return end
+	
+	-- play animation
+	if self._track then
+		self._track["love"]:Play()
+	end
+	
+	for _, player in self._currentLove do
+		if self._currentLove[player] >= self._stats["loveNeeded"] then return end
+	end
+	
+	if self._currentLove[player] ~= nil then
+		self._currentLove[player] += 1
+	else
+		self._currentLove[player] = 1
+	end
+	
+end
 
-	self._isAbilityActive = true
-	self._cooldowns.Ability = true
-	self._stats.Mana -= 25
+function Bird:taming(player:Player)
+	if self._owner ~= nil then return end
+	
+	-- play animation
+	if self._track then
+		self._track["taming"]:Play()
+	end
+	
+	self._currentLove = 0
+	self._isTame = true
+	
+	self._owner = player.UserId
+	self._stats["loveNeeded"] = -1
+end 
 
-	if self._animations["ability"] then
-		self._animations["ability"]:Play()
+function Bird:Destory()
+	if self._hitBox then
+		self._hitBox:HitStop()
+		self._hitBox:Destroy()
+		self._hitBox = nil
 	end
 
-	task.delay(0.2, function()
-		self:_createHitboxLogic(self._abilityHitboxPart, self._stats.AbilityDmg, 0.6)
-	end)
-
-	task.delay(0.8, function()
-		self._isAbilityActive = false
-	end)
-
-	task.delay(self._stats.AbilityCd, function()
-		self._cooldowns.Ability = false
-	end)
-end
-
-function CharterMaster:LoadAnimation(animation: Animation, animationName: string)
-	local animator = self._model:FindFirstChildWhichIsA("Animator", true) 
-
-	if animator then
-		local track = animator:LoadAnimation(animation)
-		self._animations[animationName] = track
-
-		if animationName == "idle" then
-			track.Looped = true
-			track:Play() 
+	if self._track then
+		for _, track in pairs(self._track) do
+			track:Stop()
+			track:Destroy()
 		end
-	end
-end
-
-function CharterMaster:UpdateStat(statName: string, value: any)
-	if self._stats[statName] ~= nil then
-		self._stats[statName] = value
-		if statName == "Speed" and self._humanoid then
-			self._humanoid.WalkSpeed = value
-		end
-	end
-end
-
-function CharterMaster:Destroy()
-	self._isDead = true
-
-	for _, connection in pairs(self._activeHitboxes) do
-		if connection then connection:Disconnect() end
+		self._track = nil
 	end
 
-	for _, track in pairs(self._animations) do
-		track:Stop()
+	if self._bird then
+		self._bird:Destroy()
+		self._bird = nil
 	end
-
-	if self._model then
-		self._model:Destroy()
+	
+	if self._hartBeat then
+		self._hartBeat:Disconnect()
+		self._hartBeat = nil
 	end
-
+	
 	self._stats = nil
-	self._animations = nil
-	self._cooldowns = nil
-	self._activeHitboxes = nil
+	self._currentLove = nil
 
 	setmetatable(self, nil)
+	table.clear(self)
 end
 
-return CharterMaster
+return Bird
