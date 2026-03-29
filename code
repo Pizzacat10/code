@@ -1,219 +1,199 @@
--- servises
+local players = {}
+
+-- Services
 local rs = game:GetService("ReplicatedStorage")
-local tw = game:GetService("TweenService")
-local plrs = game:GetService("Players")
-local runs = game:GetService("RunService")
+local Debris = game:GetService("Debris")
 
--- constants
-local maxRangeX = 30
-local maxRangeY = 30
+-- Settings 
+local run: boolean = true 
+local customWalkSound: boolean = true 
+local notCustomWalkSound: number = 0.5 -- from 1 to 0
+local walkSpeed: number = 10
+local runSpeed: number = 20
 
--- modules
-local hitBoxModule = require(rs:FindFirstChild("RaycastHitboxV4"))
+-- assets
+local animationFolder = rs:WaitForChild("Animations")
+local walkAnimationFolder = animationFolder:FindFirstChild("walkAnimationFolder")
+local runAnimationFolder = animationFolder:FindFirstChild("runAnimationFolder")
 
-local Bird = {}
-Bird.__index = Bird
+-- helper command
 
-function Bird.new(birdModel:Model,_speed:number, _hp:number, _loveNeeded:number , _damage:number , _cd:number, _attackLength:number , name:string , image:string , sound , birdType:string , birdRarity:string, hitbox:Part)
-	local self = setmetatable({},Bird)
-	
-	-- status
-	self._stats = {
-		hp = _hp,
-		speed = _speed,
-		damage = _damage,
-		cd = _cd,
-		attackLength = _attackLength,
-		loveNeeded = _loveNeeded
-	}
-	
-	self._isAttacking = false
-	
-	self._currentLove = {}
-	self._isTame = false 
-	
-	-- info
-	self._name = name
-	self._image = image
-	self._sound = sound
-	
-	self._type = birdType
-	self._rarity = birdRarity
-	
-	-- bird
-	self._bird = birdModel
-	
-	-- tween
-	self._tweenInfo = TweenInfo.new(_speed, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, 0, false, 0)
-	
-	-- animation
-	local animation = birdModel:FindFirstChild("animations")
-	
-	self._track = {}
-	
-	if animation then
-		local animator = birdModel:FindFirstChild("Humanoid"):FindFirstChild("Animator")
-		
-		if animator then
-			
-			for _, ani in animation do
-				
-				local track = animator:LoadAnimation(ani)
-				
-				self._track[ani.Name] = track
-			end
-			
+local function getMaterial(humanoid: Humanoid)
+	local floormat = humanoid.FloorMaterial
+	if not floormat or floormat == Enum.Material.Air then return "Plastic" end
+
+	local matstring = string.split(tostring(floormat), "Enum.Material.")[2]
+	return matstring or "Plastic"
+end
+
+local function stopAllAnimations(animations)
+	if not animations then return end
+	for _, track in pairs(animations) do
+		if typeof(track) == "Instance" and track:IsA("AnimationTrack") then
+			track:Stop(0.1)
 		end
-		
 	end
-	
-	-- hitbox
-	local Hitbox = hitBoxModule.new(hitbox)
-
-	Hitbox.OnHit:Connect(function(hit, humanoid)
-		print(hit.Name)
-		humanoid:TakeDamage(_damage)
-	end)
-	
-	self._hitbox = Hitbox
-	
-	return self
 end
 
-function Bird:attack()
-	if self._isAttacking == true then return end
-	
-	-- start attacking
-	self._isAttacking = true
-	self._hitbox:HitStart()
-	
-	-- play animation
-	if self._track["attack"] then
-		self._track["attack"]:Play()
+local function loadAnimation(folder, humanoid, root)
+	if not folder then return nil end
+	local animations = folder:GetChildren()
+	if #animations == 0 then return nil end
+
+	local loadedTable = {}
+
+	for _, animObject in pairs(animations) do
+		if animObject:IsA("Animation") then
+			local track = humanoid:LoadAnimation(animObject)
+			loadedTable[animObject.Name] = track
+
+			if not customWalkSound then continue end
+			
+			-- Sound Triggering Logic
+			track:GetMarkerReachedSignal("Sound"):Connect(function()
+				local material = getMaterial(humanoid)
+				local soundFolder = rs:FindFirstChild("sounds") and rs.sounds:FindFirstChild("footStep")
+				if not soundFolder then return end
+
+				local materialFolder = soundFolder:FindFirstChild(material) or soundFolder:GetChildren()[1]
+				if not materialFolder then return end
+
+				local sounds = materialFolder:GetChildren()
+				if #sounds > 0 then
+					local randomSound = sounds[math.random(1, #sounds)]
+					local sound = randomSound:Clone()
+					sound.Parent = root
+					sound:Play()
+					Debris:AddItem(sound, sound.TimeLength + 0.1)
+				end
+			end)
+		end
 	end
-	
-	-- stop attacking
-	task.delay(self._stats["attackLength"], function()
-		self._hitbox:HitStop()
-		self._isAttacking = false
-	end)
-	
+
+	return loadedTable
 end
 
-function Bird:Ai()
-	print("AI Started for: " .. self._name)
+-- Core System 
 
-	task.spawn(function()
-		while self._bird and self._bird.Parent do
-			if self._track["idle"] then self._track["idle"]:Play() end
-			task.wait(math.random(2, 5)) 
+function players.newPlayer(_char: Model)
+	if not _char then return end
 
-			local target = nil
-			for _, player in ipairs(plrs:GetPlayers()) do
-				local char = player.Character
-				if char and char:FindFirstChild("HumanoidRootPart") then
-					local dist = (char.HumanoidRootPart.Position - self._bird:GetPivot().Position).Magnitude
-					if dist <= 5 then
-						target = char
-						break
-					end
+	local player = {}
+
+	-- player Var
+	local char = _char
+	local root = char:WaitForChild("HumanoidRootPart")
+	local hum = char:WaitForChild("Humanoid")
+
+	-- status Var
+	local currentDirection = nil
+	local running = false
+	local internalChange = false 
+
+	-- Character Initialization
+	local animateScript = char:FindFirstChild("Animate")
+	if animateScript then animateScript.Disabled = true end
+
+	root.Running.Volume = customWalkSound and 0 or notCustomWalkSound
+
+	-- Loading
+	local walkAnimations = loadAnimation(walkAnimationFolder, hum, root)
+	local runAnimations = run and loadAnimation(runAnimationFolder, hum, root) or nil
+
+	if walkAnimations and walkAnimations["Idle"] then
+		walkAnimations["Idle"]:Play()
+	end
+
+	-- Methods
+
+	function player:toggleRunning()
+		if not run or not runAnimations then return end
+
+		running = not running
+		hum.WalkSpeed = running and runSpeed or walkSpeed
+
+		stopAllAnimations(runAnimations)
+		stopAllAnimations(walkAnimations)
+
+		local transition = running and walkAnimations["toRun"] or runAnimations["toWalk"]
+
+		if transition and currentDirection ~= nil then
+			internalChange = true
+			transition:Play()
+
+			local connection
+			connection = transition.Ended:Connect(function()
+				internalChange = false
+				connection:Disconnect()
+			end)
+		else
+			if walkAnimations["Idle"] then
+				walkAnimations["Idle"]:Play()
+			end
+		end
+
+		currentDirection = nil 
+	end
+
+	function player:update()
+		if not root or not hum or hum.Health <= 0 then return end
+		if internalChange then return end
+
+		local moveDir = hum.MoveDirection
+		local velocity = root.CFrame:VectorToObjectSpace(moveDir)
+
+		local newDirection = nil
+		if velocity.X < -0.5 then newDirection = "Left"
+		elseif velocity.X > 0.5 then newDirection = "Right"
+		elseif velocity.Z < -0.5 then newDirection = "Backward"
+		elseif velocity.Z > 0.5 then newDirection = "Forward"
+		end
+
+		local activeAnims = (running and runAnimations) or walkAnimations
+		if not activeAnims then return end
+
+		if newDirection ~= currentDirection then
+			stopAllAnimations(activeAnims)
+
+			if newDirection ~= nil then
+				if activeAnims[newDirection] then
+					activeAnims[newDirection]:Play()
+				end
+			else
+				local endAnim = currentDirection and activeAnims[currentDirection .. "End"]
+				if endAnim then endAnim:Play() end
+
+				if activeAnims["Idle"] then
+					activeAnims["Idle"]:Play()
 				end
 			end
+			currentDirection = newDirection
+		end
+	end
 
-			if target then
-				-- Attack logic
-				self:attack()
-				task.wait(self._stats["cd"] or 1)
-			else
-				local currentPos = self._bird:GetPivot().Position
-				local offsetX = math.random(-maxRangeX, maxRangeX)
-				local offsetZ = math.random(-maxRangeY, maxRangeY)
-				local targetPos = currentPos + Vector3.new(offsetX, 0, offsetZ)
-
-				local lookCFrame = CFrame.lookAt(currentPos, targetPos)
-
-				if self._track["walk"] then self._track["walk"]:Play() end
-
-				local moveTween = tw:Create(self._bird.PrimaryPart, self._tweenInfo, {
-					CFrame = CFrame.lookAt(targetPos, targetPos + (targetPos - currentPos))
-				})
-
-				moveTween:Play()
-				moveTween.Completed:Wait()
-
-				if self._track["walk"] then self._track["walk"]:Stop() end
+	function player:clean()
+		-- Stop and destroy all tracks
+		local allPacks = {walkAnimations, runAnimations}
+		for _, pack in ipairs(allPacks) do
+			if pack then
+				for _, track in pairs(pack) do
+					track:Stop(0)
+					track:Destroy()
+				end
+				table.clear(pack)
 			end
-
-			task.wait(0.1)
 		end
-	end)
+
+		-- Reference Cleanup
+		walkAnimations = nil
+		runAnimations = nil
+		char = nil
+		root = nil
+		hum = nil
+
+	end
+
+	return player
 end
 
-function Bird:Love(player:Player)
-	if self._isTame == true then return end
-	
-	-- play animation
-	if self._track then
-		self._track["love"]:Play()
-	end
-	
-	for _, player in self._currentLove do
-		if self._currentLove[player] >= self._stats["loveNeeded"] then return end
-	end
-	
-	if self._currentLove[player] ~= nil then
-		self._currentLove[player] += 1
-	else
-		self._currentLove[player] = 1
-	end
-	
-end
-
-function Bird:taming(player:Player)
-	if self._owner ~= nil then return end
-	
-	-- play animation
-	if self._track then
-		self._track["taming"]:Play()
-	end
-	
-	self._currentLove = 0
-	self._isTame = true
-	
-	self._owner = player.UserId
-	self._stats["loveNeeded"] = -1
-end 
-
-function Bird:Destory()
-	if self._hitBox then
-		self._hitBox:HitStop()
-		self._hitBox:Destroy()
-		self._hitBox = nil
-	end
-
-	if self._track then
-		for _, track in pairs(self._track) do
-			track:Stop()
-			track:Destroy()
-		end
-		self._track = nil
-	end
-
-	if self._bird then
-		self._bird:Destroy()
-		self._bird = nil
-	end
-	
-	if self._hartBeat then
-		self._hartBeat:Disconnect()
-		self._hartBeat = nil
-	end
-	
-	self._stats = nil
-	self._currentLove = nil
-
-	setmetatable(self, nil)
-	table.clear(self)
-end
-
-return Bird
+return players
